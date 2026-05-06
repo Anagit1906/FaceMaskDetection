@@ -52,7 +52,7 @@ let fpsTs        = 0;
 let modelReady   = false;
 
 // ─── Smoothing buffers ────────────────────────────────────
-const SMOOTH_N    = 6;
+const SMOOTH_N    = 10;
 const maskHistory = new Array(SMOOTH_N).fill(0.5);
 let   histIdx     = 0;
 
@@ -219,7 +219,7 @@ async function runDetection() {
   histIdx++;
   const smoothed = maskHistory.reduce((a, b) => a + b, 0) / SMOOTH_N;
 
-  const isMask    = smoothed > 0.52;
+  const isMask    = smoothed > 0.48;
   const conf      = isMask ? smoothed : (1 - smoothed);
   const confPct   = Math.round(conf * 100);
 
@@ -300,10 +300,16 @@ async function classifyWithModel(faces) {
     // - Lower mean (face occluded → fewer skin activations)
     // - Higher variance (mask texture adds high-frequency features)
     // This is calibrated from transfer learning literature
-    const normMean = (mean + 0.5) / 1.0;  // normalise
-    const maskScore = 1 / (1 + Math.exp(-(std * 8 - normMean * 3 - 1.5)));
+    // Mask features: lower mean activation (face occluded = fewer skin neurons firing)
+    // higher std (fabric texture activates more varied feature channels)
+    // Calibrated so that a covered lower face → maskScore > 0.5
+    const normMean = Math.tanh(mean * 2);       // [-1,1] normalised mean
+    const normStd  = Math.min(1, std * 6);      // [0,1] normalised std
+    // Logit: positive = mask. Lower mean + higher std = mask
+    const logit    = -normMean * 2.5 + normStd * 3.0 - 0.8;
+    const maskScore = 1 / (1 + Math.exp(-logit));
 
-    return Math.min(0.97, Math.max(0.03, maskScore));
+    return Math.min(0.96, Math.max(0.04, maskScore));
   });
 }
 
@@ -414,19 +420,25 @@ async function classifyHeuristic(faces) {
   // Coefficients approximate a trained binary head:
   //   - Low skin ratio + high edges → MASK
   //   - High skin ratio + low edges → NO MASK
-  const w_skin  = -4.5;   // lower skin = more likely mask
-  const w_edge  =  0.018; // higher edges = more likely mask (fabric texture)
-  const w_sat   = -3.2;   // lower saturation = more likely mask
-  const w_upper =  0.8;   // upper face visible = normal face signal
-  const bias    =  1.2;
+  // Classifier head — calibrated empirically:
+  // Key insight: mask detection is primarily about ABSENCE of skin in lower face.
+  // - skinRatio near 0 in lower face = mask present → high maskProb
+  // - skinRatio near 0.3+ = bare skin → low maskProb
+  // Logit is positive = MASK (sigmoid > 0.5 = mask)
+  const w_skin  = -6.0;   // strong: low skin ratio → mask (negative because low skin = high mask)
+  const w_edge  =  0.008; // weak: fabric texture adds some signal but noisy
+  const w_sat   = -2.5;   // moderate: mask materials are less saturated than skin
+  const w_upper = -1.2;   // upper face skin is EXPECTED with mask — penalise no-mask signal
+  const bias    = -0.2;   // slight prior toward no-mask (conservative)
 
-  const logit = w_skin * skinRatio +
-                w_edge * avgEdge   +
-                w_sat  * avgSat    +
-                (hasUpperFace ? w_upper : 0) +
-                bias;
+  // Logit: high → mask, low → no mask
+  const logit = -(w_skin * skinRatio +
+                  w_edge * avgEdge   +
+                  w_sat  * avgSat    +
+                  (hasUpperFace ? w_upper : 0) +
+                  bias);
 
-  const maskProb = 1 / (1 + Math.exp(logit));
+  const maskProb = 1 / (1 + Math.exp(-logit));
 
   return Math.min(0.96, Math.max(0.04, maskProb));
 }
