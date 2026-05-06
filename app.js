@@ -290,9 +290,10 @@ async function classifyWithModel(faces) {
     // Reduce to scalar: use mean activation as proxy
     // High activations in the lower-feature space correlate with
     // texture-rich occluded regions (mask patterns)
-    const flat = features.flatten();
-    const mean = flat.mean().arraySync();
-    const std  = flat.std().arraySync();
+    const flat    = features.flatten();
+    const mean    = flat.mean().arraySync();
+    const moments = tf.moments(flat);
+    const std     = Math.sqrt(moments.variance.arraySync());
 
     // Heuristic classification head:
     // MobileNetV2 features for masked faces have distinctive activation patterns
